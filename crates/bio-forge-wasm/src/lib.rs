@@ -180,6 +180,8 @@ pub struct SolvateConfig {
     /// Target net charge after solvation. Default: `0`
     #[serde(default)]
     pub target_charge: i32,
+    #[serde(default)]
+    pub salt_concentration: Option<f64>,
     /// Random seed for reproducible placement.
     #[serde(default)]
     pub rng_seed: Option<u64>,
@@ -211,6 +213,7 @@ impl Default for SolvateConfig {
             cations: default_cations(),
             anions: default_anions(),
             target_charge: 0,
+            salt_concentration: None,
             rng_seed: None,
         }
     }
@@ -250,6 +253,7 @@ impl From<SolvateConfig> for CoreSolvateConfig {
             cations,
             anions,
             target_charge: cfg.target_charge,
+            salt_concentration: cfg.salt_concentration,
             rng_seed: cfg.rng_seed,
         }
     }

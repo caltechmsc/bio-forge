@@ -513,6 +513,26 @@ impl Structure {
             .collect();
         Grid::new(items, cell_size)
     }
+
+    pub fn box_volume(&self) -> Option<f64> {
+        match self.box_vectors {
+            Some(box_vectors) => Some(box_volume(box_vectors)),
+            None => None,
+        }
+    }
+}
+
+fn box_volume(box_vectors: [[f64; 3]; 3]) -> f64 {
+    let [a, b, c] = box_vectors;
+
+    let cross = [
+        b[1] * c[2] - b[2] * c[1],
+        b[2] * c[0] - b[0] * c[2],
+        b[0] * c[1] - b[1] * c[0],
+    ];
+
+    let dot = a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2];
+    dot.abs()
 }
 
 impl fmt::Display for Structure {

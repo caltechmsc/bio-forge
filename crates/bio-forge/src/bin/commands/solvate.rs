@@ -31,6 +31,9 @@ pub struct SolvateArgs {
         conflicts_with = "neutralize"
     )]
     pub target_charge: Option<i32>,
+    /// Desired salt concentration (M)
+    #[arg(long = "salt-concentration", value_name = "CONCENTRATION")]
+    pub salt_concentration: Option<f64>,
     /// Random seed used for deterministic ion placement.
     #[arg(long, value_name = "INT")]
     pub seed: Option<u64>,
@@ -44,6 +47,7 @@ pub fn run(structure: &mut Structure, args: &SolvateArgs) -> Result<()> {
             water_spacing: args.spacing,
             cations: vec![parse_cation(&args.cation)?],
             anions: vec![parse_anion(&args.anion)?],
+            salt_concentration: args.salt_concentration,
             rng_seed: args.seed,
             ..SolvateConfig::default()
         };

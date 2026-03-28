@@ -20,6 +20,8 @@ use rand::rngs::StdRng;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 
+const WATER_MOLARITY: f64 = 55.5;
+
 /// Supported cation species for ionic replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cation {
@@ -50,6 +52,15 @@ pub enum Anion {
     F,
 }
 
+/// Supported ion species for solvent replacement.
+#[derive(Debug, Clone, Copy)]
+enum Ion {
+    /// Cation species used for replacement.
+    Cation(Cation),
+    /// Anion species used for replacement.
+    Anion(Anion),
+}
+
 /// Configuration parameters controlling solvent placement and ionization.
 #[derive(Debug, Clone)]
 pub struct SolvateConfig {
@@ -67,6 +78,8 @@ pub struct SolvateConfig {
     pub anions: Vec<Anion>,
     /// Target total charge after solvating (solute + ions + water).
     pub target_charge: i32,
+    /// Desired salt concentration (M)
+    pub salt_concentration: Option<f64>,
     /// Optional RNG seed for deterministic solvent orientation.
     pub rng_seed: Option<u64>,
 }
@@ -82,8 +95,37 @@ impl Default for SolvateConfig {
             cations: vec![Cation::Na],
             anions: vec![Anion::Cl],
             target_charge: 0,
+            salt_concentration: None,
             rng_seed: None,
         }
+    }
+}
+
+impl SolvateConfig {
+    /// Selects a random anion from the configured anion pool.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - Random number generator used for sampling.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&Anion)` when at least one anion is configured, otherwise `None`.
+    pub fn choose_random_anion(&self, rng: &mut impl Rng) -> Option<&Anion> {
+        self.anions.choose(rng)
+    }
+
+    /// Selects a random cation from the configured cation pool.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - Random number generator used for sampling.
+    ///
+    /// # Returns
+    ///
+    /// `Some(&Cation)` when at least one cation is configured, otherwise `None`.
+    pub fn choose_random_cation(&self, rng: &mut impl Rng) -> Option<&Cation> {
+        self.cations.choose(rng)
     }
 }
 
@@ -168,6 +210,20 @@ impl Anion {
             Anion::Br => "BR",
             Anion::I => "I",
             Anion::F => "F",
+        }
+    }
+}
+
+impl Ion {
+    /// Reports the integer charge for this ion.
+    ///
+    /// # Returns
+    ///
+    /// Signed charge in units of e (positive for cations, negative for anions).
+    pub fn charge(&self) -> i32 {
+        match self {
+            Self::Cation(ion) => ion.charge(),
+            Self::Anion(ion) => ion.charge(),
         }
     }
 }
@@ -383,6 +439,10 @@ fn translate_structure(structure: &mut Structure, vec: &Vector3<f64>) {
     }
 }
 
+fn total_ion_charge(ions: &Vec<Ion>) -> i32 {
+    ions.iter().map(|ion| ion.charge()).sum()
+}
+
 /// Estimates the current solute charge using template charges and known ions.
 ///
 /// # Arguments
@@ -441,46 +501,76 @@ fn replace_with_ions(
     }
 
     let current_charge = calculate_solute_charge(structure);
-    let mut charge_diff = config.target_charge - current_charge;
+    let charge_diff = config.target_charge - current_charge;
+    dbg!(current_charge, config.target_charge);
+    let total_waters = water_indices.len();
+    let mut ion_plan = Vec::new();
 
     water_indices.shuffle(rng);
 
-    let mut attempts = 0;
-    let max_attempts = water_indices.len();
+    // Add neutral ions to achieve desired salt concentration
+    match config.salt_concentration {
+        Some(salt_concentration) => {
+            // TODO: we are replacing waters with ions which changes total_waters for every ion added. We should apply a correction term
+            let total_ions =
+                ((total_waters as f64) * (salt_concentration / WATER_MOLARITY)).round() as usize;
 
-    while charge_diff != 0 && attempts < max_attempts {
-        if let Some(res_id) = water_indices.pop() {
-            let residue = solvent_chain.residue_mut(res_id, None).unwrap();
-            let pos = residue.atom("O").unwrap().pos;
-
-            if charge_diff < 0 {
-                if let Some(anion) = config.anions.choose(rng) {
-                    *residue = create_anion_residue(res_id, *anion, pos);
-                    charge_diff -= anion.charge();
-                } else {
-                    break;
+            for _ in 0..total_ions {
+                let cation = config
+                    .choose_random_cation(rng)
+                    .ok_or(Error::IonizationFailed {
+                        details: "No cations configured".to_string(),
+                    })?;
+                ion_plan.push(Ion::Cation(*cation));
+                for _ in 0..cation.charge() {
+                    let anion = config
+                        .choose_random_anion(rng)
+                        .ok_or(Error::IonizationFailed {
+                            details: "No anions configured".to_string(),
+                        })?;
+                    ion_plan.push(Ion::Anion(*anion));
                 }
-            } else if let Some(cation) = config.cations.choose(rng) {
-                *residue = create_cation_residue(res_id, *cation, pos);
-                charge_diff -= cation.charge();
-            } else {
-                break;
             }
         }
-        attempts += 1;
+        None => {}
     }
 
-    if charge_diff != 0 {
-        if water_indices.is_empty() {
+    // Add ions to reach target charge
+    while (charge_diff - total_ion_charge(&ion_plan)) != 0 {
+        let ion = if (charge_diff - total_ion_charge(&ion_plan)) < 0 {
+            Ion::Anion(
+                *config
+                    .choose_random_anion(rng)
+                    .ok_or(Error::IonizationFailed {
+                        details: "No anions configured".to_string(),
+                    })?,
+            )
+        } else {
+            Ion::Cation(
+                *config
+                    .choose_random_cation(rng)
+                    .ok_or(Error::IonizationFailed {
+                        details: "No cations configured".to_string(),
+                    })?,
+            )
+        };
+
+        ion_plan.push(ion);
+        if ion_plan.len() > water_indices.len() {
             return Err(Error::BoxTooSmall);
         }
+    }
 
-        return Err(Error::IonizationFailed {
-            details: format!(
-                "Could not reach target charge {}. Remaining diff: {}. Check if proper ion types are provided.",
-                config.target_charge, charge_diff
-            ),
-        });
+    ion_plan.shuffle(rng);
+    for ion in ion_plan {
+        let res_id = water_indices.pop().ok_or(Error::BoxTooSmall)?;
+        let residue = solvent_chain.residue_mut(res_id, None).unwrap();
+        let pos = residue.atom("O").unwrap().pos;
+
+        *residue = match ion {
+            Ion::Cation(cation) => create_cation_residue(res_id, cation, pos),
+            Ion::Anion(anion) => create_anion_residue(res_id, anion, pos),
+        };
     }
 
     Ok(())
@@ -616,6 +706,7 @@ mod tests {
             cations: vec![],
             anions: vec![],
             target_charge: 0,
+            salt_concentration: None,
             rng_seed: Some(42),
         };
 
@@ -676,6 +767,7 @@ mod tests {
             cations: vec![],
             anions: vec![],
             target_charge: 0,
+            salt_concentration: None,
             rng_seed: Some(7),
         };
 
@@ -719,6 +811,7 @@ mod tests {
             cations: vec![],
             anions: vec![Anion::Cl],
             target_charge: 0,
+            salt_concentration: None,
             rng_seed: Some(17),
         };
 
@@ -760,6 +853,7 @@ mod tests {
             cations: vec![Cation::Na],
             anions: vec![],
             target_charge: 2,
+            salt_concentration: None,
             rng_seed: Some(5),
         };
 
